@@ -1,0 +1,9 @@
+amount,type,category,description,transactionDate,paymentMethod,tags
+100,expense,Food & Dining,Lunch at restaurant,2024-01-15,cash,"lunch,work"
+500,income,Salary,Monthly salary payment,2024-01-01,bank_transfer,"salary,monthly"
+75,expense,Transportation,Uber ride,2024-01-16,card,"transport,uber"
+200,expense,Shopping,Groceries from supermarket,2024-01-17,cash,"groceries,food"
+1500,income,Freelance,Web development project,2024-01-10,upi,"freelance,project"
+50,expense,Entertainment,Movie tickets,2024-01-18,card,"entertainment,movie"
+300,expense,Bills,Electricity bill,2024-01-05,bank_transfer,"bills,utilities"
+250,expense,Health,Pharmacy medicines,2024-01-12,cash,"health,medicine" 

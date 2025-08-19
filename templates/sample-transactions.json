@@ -1,0 +1,74 @@
+[
+  {
+    "amount": 100,
+    "type": "expense",
+    "category": "Food & Dining",
+    "description": "Lunch at restaurant",
+    "transactionDate": "2024-01-15",
+    "paymentMethod": "cash",
+    "tags": ["lunch", "work"]
+  },
+  {
+    "amount": 500,
+    "type": "income",
+    "category": "Salary",
+    "description": "Monthly salary payment",
+    "transactionDate": "2024-01-01",
+    "paymentMethod": "bank_transfer",
+    "tags": ["salary", "monthly"]
+  },
+  {
+    "amount": 75,
+    "type": "expense",
+    "category": "Transportation",
+    "description": "Uber ride",
+    "transactionDate": "2024-01-16",
+    "paymentMethod": "card",
+    "tags": ["transport", "uber"]
+  },
+  {
+    "amount": 200,
+    "type": "expense",
+    "category": "Shopping",
+    "description": "Groceries from supermarket",
+    "transactionDate": "2024-01-17",
+    "paymentMethod": "cash",
+    "tags": ["groceries", "food"]
+  },
+  {
+    "amount": 1500,
+    "type": "income",
+    "category": "Freelance",
+    "description": "Web development project",
+    "transactionDate": "2024-01-10",
+    "paymentMethod": "upi",
+    "tags": ["freelance", "project"]
+  },
+  {
+    "amount": 50,
+    "type": "expense",
+    "category": "Entertainment",
+    "description": "Movie tickets",
+    "transactionDate": "2024-01-18",
+    "paymentMethod": "card",
+    "tags": ["entertainment", "movie"]
+  },
+  {
+    "amount": 300,
+    "type": "expense",
+    "category": "Bills",
+    "description": "Electricity bill",
+    "transactionDate": "2024-01-05",
+    "paymentMethod": "bank_transfer",
+    "tags": ["bills", "utilities"]
+  },
+  {
+    "amount": 250,
+    "type": "expense",
+    "category": "Health",
+    "description": "Pharmacy medicines",
+    "transactionDate": "2024-01-12",
+    "paymentMethod": "cash",
+    "tags": ["health", "medicine"]
+  }
+] 
