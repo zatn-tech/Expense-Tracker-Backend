@@ -13,12 +13,45 @@ class Email {
 
   newTransport() {
     if (process.env.NODE_ENV === 'production') {
-      // Use SendGrid or other production email service
-      return nodemailer.createTransporter({
-        service: 'SendGrid',
+      // Try SendGrid first if configured
+      if (process.env.SENDGRID_API_KEY) {
+        console.log('📧 Using SendGrid for email delivery');
+        return nodemailer.createTransport({
+          service: 'SendGrid',
+          auth: {
+            user: 'apikey',
+            pass: process.env.SENDGRID_API_KEY
+          }
+        });
+      }
+      
+      // Fallback to SMTP with multiple attempts
+      console.log('📧 Using SMTP for email delivery');
+      
+      // Try without authentication first (as test showed this works)
+      if (process.env.EMAIL_NO_AUTH === 'true') {
+        console.log('📧 Using SMTP without authentication');
+        return nodemailer.createTransport({
+          host: process.env.EMAIL_HOST || 'mail.zatn.in',
+          port: process.env.EMAIL_PORT || 587,
+          secure: false,
+          tls: {
+            rejectUnauthorized: false
+          }
+        });
+      }
+      
+      // Try with authentication
+      return nodemailer.createTransport({
+        host: process.env.EMAIL_HOST || 'mail.zatn.in',
+        port: process.env.EMAIL_PORT || 587,
+        secure: process.env.EMAIL_PORT == 465,
+        tls: {
+          rejectUnauthorized: false
+        },
         auth: {
-          user: process.env.SENDGRID_USERNAME,
-          pass: process.env.SENDGRID_PASSWORD
+          user: process.env.EMAIL_USERNAME,
+          pass: process.env.EMAIL_PASSWORD
         }
       });
     }
@@ -27,6 +60,10 @@ class Email {
     return nodemailer.createTransport({
       host: process.env.EMAIL_HOST,
       port: process.env.EMAIL_PORT,
+      secure: process.env.EMAIL_PORT == 465, // true for 465, false for other ports
+      tls: {
+        rejectUnauthorized: false // Allow self-signed certificates for shared hosting
+      },
       auth: {
         user: process.env.EMAIL_USERNAME,
         pass: process.env.EMAIL_PASSWORD
