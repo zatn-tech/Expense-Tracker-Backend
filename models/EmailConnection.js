@@ -58,10 +58,16 @@ const emailConnectionSchema = new mongoose.Schema({
     enabled: { type: Boolean, default: true },
     frequency: { type: String, enum: ['hourly', 'daily', 'weekly'], default: 'daily' },
     scanDays: { type: Number, default: 7 }, // How many days back to scan
+    maxEmailsPerScan: { type: Number, default: 50 }, // Max emails to scan per session
     autoCreateTransactions: { type: Boolean, default: false }, // Auto-create or suggest
     categories: [String], // Preferred categories for auto-categorization
     minAmount: { type: Number, default: 0 }, // Minimum amount to consider
-    maxAmount: { type: Number, default: 1000000 } // Maximum amount to consider
+    maxAmount: { type: Number, default: 1000000 }, // Maximum amount to consider
+    scanKeywords: {
+      success: { type: [String], default: ['successful', 'completed', 'confirmed', 'approved', 'success', 'successfully'] },
+      failure: { type: [String], default: ['failed', 'declined', 'rejected', 'unsuccessful', 'error', 'cancelled', 'cancelled'] },
+      pending: { type: [String], default: ['pending', 'processing', 'in progress', 'awaiting', 'pending approval'] }
+    }
   },
   
   // Error tracking
@@ -90,6 +96,17 @@ const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'your-secret-encryption-key
 
 // Encrypt sensitive data before saving
 emailConnectionSchema.pre('save', function(next) {
+  // Ensure IMAP settings have proper defaults
+  if (this.provider === 'custom' && this.imap) {
+    if (this.imap.secure === undefined) {
+      this.imap.secure = true; // Default to secure for most email providers
+    }
+    if (!this.imap.port) {
+      this.imap.port = this.imap.secure ? 993 : 143;
+    }
+  }
+  
+  // Encrypt sensitive data
   if (this.isModified('oauth2.refreshToken') || this.isModified('imap.password')) {
     if (this.oauth2.refreshToken) {
       this.oauth2.refreshToken = this.encrypt(this.oauth2.refreshToken);

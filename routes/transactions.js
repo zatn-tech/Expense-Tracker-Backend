@@ -596,6 +596,117 @@ router.post('/:userId/transactions/import/json', auth, validateUserAccess, uploa
   }
 });
 
+// Update transaction
+router.put('/:userId/transactions/:transactionId', auth, validateUserAccess, async (req, res) => {
+  try {
+    const { 
+      amount, 
+      type, 
+      category, 
+      description, 
+      transactionDate,
+      paymentMethod,
+      tags,
+      location,
+      accountId
+    } = req.body;
+
+    // Find the transaction
+    const transaction = await Transaction.findOne({
+      _id: req.params.transactionId,
+      userId: req.params.userId
+    });
+    
+    if (!transaction) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+
+    // Validate required fields if provided
+    if (amount !== undefined && (!amount || amount <= 0)) {
+      return res.status(400).json({ error: 'Amount must be greater than 0' });
+    }
+
+    if (type !== undefined && !['income', 'expense'].includes(type)) {
+      return res.status(400).json({ error: 'Type must be either income or expense' });
+    }
+
+    // If accountId is provided, validate it belongs to the user
+    if (accountId !== undefined) {
+      const Account = require('../models/Account');
+      const account = await Account.findOne({
+        _id: accountId,
+        userId: req.params.userId,
+        isActive: true
+      });
+
+      if (!account) {
+        return res.status(400).json({ error: 'Invalid account or account not found' });
+      }
+    }
+
+    // Store old values for balance calculation
+    const oldAmount = transaction.amount;
+    const oldType = transaction.type;
+    const oldAccountId = transaction.accountId;
+
+    // Update account balances BEFORE updating the transaction
+    if (amount !== undefined || type !== undefined || accountId !== undefined) {
+      const Account = require('../models/Account');
+      
+      // First, revert the old transaction from the old account
+      const oldAccount = await Account.findById(oldAccountId);
+      if (oldAccount) {
+        // Revert the old transaction
+        if (oldType === 'income') {
+          oldAccount.balance -= oldAmount;
+        } else {
+          oldAccount.balance += oldAmount;
+        }
+        await oldAccount.save();
+      }
+    }
+
+    // Update transaction fields
+    if (amount !== undefined) transaction.amount = amount;
+    if (type !== undefined) transaction.type = type;
+    if (category !== undefined) transaction.category = category;
+    if (description !== undefined) transaction.description = description;
+    if (transactionDate !== undefined) transaction.transactionDate = new Date(transactionDate);
+    if (paymentMethod !== undefined) transaction.paymentMethod = paymentMethod;
+    if (tags !== undefined) transaction.tags = tags;
+    if (location !== undefined) transaction.location = location;
+    if (accountId !== undefined) transaction.accountId = accountId;
+
+    // Save the updated transaction (this will trigger post-save middleware to apply new balance)
+    await transaction.save();
+
+    // Update dependent models
+    const modelUpdates = await updateDependentModels(req.params.userId, transaction, 'update');
+
+    // Populate account information
+    await transaction.populate('accountId', 'name type balance');
+
+    res.json({ 
+      status: 'success',
+      data: transaction,
+      budgetAlerts: modelUpdates.budgetAlerts.map(alert => ({
+        title: alert.isExceeded ? 'Budget Exceeded!' : 'Budget Alert',
+        message: alert.isExceeded 
+          ? `You've exceeded your ${alert.budgetName} budget by ₹${alert.excessAmount.toFixed(2)}`
+          : `Your ${alert.budgetName} budget is ${alert.usagePercentage.toFixed(1)}% used`,
+        type: alert.isExceeded ? 'error' : 'warning',
+        budgetId: alert.budgetId,
+        alertType: alert.alertType
+      })),
+      goalUpdates: modelUpdates.goalUpdates,
+      goalNotifications: modelUpdates.goalNotifications
+    });
+  } catch (err) {
+    console.error('Transaction update error:', err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // Delete transaction
 router.delete('/:userId/transactions/:transactionId', auth, validateUserAccess, async (req, res) => {
   try {

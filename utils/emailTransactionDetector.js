@@ -76,36 +76,36 @@ class EmailTransactionDetector {
     const detectedTransactions = [];
     
     try {
-      console.log(`   🔍 Starting transaction detection for email: ${emailMetadata.subject}`);
+      
       
       // Extract text content from email
       const textContent = this.extractTextContent(emailContent);
-      console.log(`   📝 Extracted text content length: ${textContent.length} characters`);
+      
       
       // Detect amounts
       const amounts = this.detectAmounts(textContent);
-      console.log(`   💰 Detected amounts: ${amounts.length > 0 ? amounts.join(', ') : 'None'}`);
+      
       
       // Detect dates
       const dates = this.detectDates(textContent);
-      console.log(`   📅 Detected dates: ${dates.length > 0 ? dates.map(d => d.toDateString()).join(', ') : 'None'}`);
+      
       
       // Detect transaction type
       const transactionType = this.detectTransactionType(textContent);
-      console.log(`   🏷️  Transaction type: ${transactionType}`);
+      
       
       // Detect category
       const category = this.detectCategory(textContent);
-      console.log(`   📂 Category: ${category}`);
+      
       
       // Detect description
       const description = this.detectDescription(textContent, emailMetadata);
-      console.log(`   📋 Description: ${description}`);
+      
       
       // Process each detected amount
-      console.log(`   🔄 Processing ${amounts.length} detected amounts...`);
+      
       for (const amount of amounts) {
-        console.log(`   💸 Processing amount: ${amount}`);
+        
         const transaction = await this.createEmailTransaction({
           userId,
           emailConnectionId,
@@ -126,7 +126,7 @@ class EmailTransactionDetector {
         }
       }
       
-      console.log(`   🎯 Total transactions created: ${detectedTransactions.length}`);
+      
       return detectedTransactions;
     } catch (error) {
       console.error('Error detecting transactions:', error);
@@ -653,6 +653,9 @@ class EmailTransactionDetector {
       // Calculate confidence scores
       const confidence = this.calculateConfidence(textContent, amount, category, description);
       
+      // Detect transaction status based on email content and keywords
+      const transactionStatus = this.detectTransactionStatus(textContent, emailMetadata);
+      
       // Return detected transaction data (don't save to database yet)
       return {
         userId,
@@ -666,6 +669,7 @@ class EmailTransactionDetector {
         detectedCategory: category,
         detectedDescription: description,
         detectedDate: dates.length > 0 ? dates[0] : new Date(),
+        status: transactionStatus, // Add transaction status
         confidence,
         rawContent: textContent.substring(0, 1000), // Limit content length
         parsingData: {
@@ -673,7 +677,8 @@ class EmailTransactionDetector {
           categoryKeywords: this.getCategoryKeywords(textContent, category),
           datePatterns: this.getMatchingPatterns(textContent, this.datePatterns),
           merchantNames: this.extractMerchantNames(textContent),
-          transactionTypes: this.getTransactionTypeIndicators(textContent, transactionType)
+          transactionTypes: this.getTransactionTypeIndicators(textContent, transactionType),
+          transactionStatus: transactionStatus // Add status to parsing data
         }
       };
       
@@ -784,6 +789,64 @@ class EmailTransactionDetector {
     }
     
     return indicators.slice(0, 3); // Limit to 3 indicators
+  }
+
+  /**
+   * Detect transaction status (success/failure/pending) based on email content
+   */
+  detectTransactionStatus(textContent, emailMetadata) {
+    const lowerContent = textContent.toLowerCase();
+    const lowerSubject = (emailMetadata.subject || '').toLowerCase();
+    
+    // Default status
+    let status = 'pending';
+    
+    // Success keywords (higher priority)
+    const successKeywords = [
+      'successful', 'completed', 'confirmed', 'approved', 'success', 'successfully',
+      'processed', 'accepted', 'verified', 'done', 'finished', 'executed',
+      'payment successful', 'transaction successful', 'order confirmed',
+      'booking confirmed', 'reservation confirmed', 'subscription active'
+    ];
+    
+    // Failure keywords
+    const failureKeywords = [
+      'failed', 'declined', 'rejected', 'unsuccessful', 'error', 'cancelled',
+      'cancelled', 'denied', 'invalid', 'expired', 'timeout', 'insufficient',
+      'payment failed', 'transaction failed', 'order cancelled',
+      'booking cancelled', 'reservation cancelled', 'subscription expired'
+    ];
+    
+    // Pending keywords
+    const pendingKeywords = [
+      'pending', 'processing', 'in progress', 'awaiting', 'pending approval',
+      'under review', 'being processed', 'queued', 'scheduled', 'waiting'
+    ];
+    
+    // Check for success indicators
+    const successMatch = successKeywords.some(keyword => 
+      lowerContent.includes(keyword) || lowerSubject.includes(keyword)
+    );
+    
+    // Check for failure indicators
+    const failureMatch = failureKeywords.some(keyword => 
+      lowerContent.includes(keyword) || lowerSubject.includes(keyword)
+    );
+    
+    // Check for pending indicators
+    const pendingMatch = pendingKeywords.some(keyword => 
+      lowerContent.includes(keyword) || lowerSubject.includes(keyword)
+    );
+    
+    // Determine status based on matches
+    if (failureMatch) {
+      status = 'rejected'; // Failed transactions are auto-rejected
+    } else {
+      // All other transactions (including success) should be pending for user review
+      status = 'pending';
+    }
+    
+    return status;
   }
 
   /**

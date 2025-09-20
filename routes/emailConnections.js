@@ -22,10 +22,19 @@ router.post('/:userId/email-connections/:connectionId/refresh-tokens', validateU
 
 // Email Transaction Management
 router.get('/:userId/email-transactions', validateUserAccess, emailConnectionController.getEmailTransactions);
-router.get('/:userId/email-transactions/:transactionId', validateUserAccess, emailConnectionController.getEmailTransaction);
+// Specific action routes must come before the general :transactionId route
 router.post('/:userId/email-transactions/:transactionId/approve', validateUserAccess, emailConnectionController.approveTransaction);
 router.post('/:userId/email-transactions/:transactionId/reject', validateUserAccess, emailConnectionController.rejectTransaction);
-router.post('/:userId/email-transactions/:transactionId/modify', validateUserAccess, emailConnectionController.modifyTransaction);
+router.put('/:userId/email-transactions/:transactionId/modify', validateUserAccess, emailConnectionController.modifyTransaction);
+router.get('/:userId/email-transactions/:transactionId', validateUserAccess, emailConnectionController.getEmailTransaction);
+
+// Debug: Log all registered routes
+console.log('📋 Email Connection Routes Registered:');
+console.log('  GET    /:userId/email-transactions');
+console.log('  POST   /:userId/email-transactions/:transactionId/approve');
+console.log('  POST   /:userId/email-transactions/:transactionId/reject');
+console.log('  PUT    /:userId/email-transactions/:transactionId/modify');
+console.log('  GET    /:userId/email-transactions/:transactionId');
 
 // Batch Operations
 router.post('/:userId/email-transactions/process-pending', validateUserAccess, emailConnectionController.processPendingTransactions);

@@ -85,9 +85,19 @@ class EmailConnectionController {
     if (provider === 'custom') {
       if (!imap || !imap.host || !imap.username || !imap.password) {
         throw new AppError(
-          'IMAP credentials required for custom provider. Please provide host, username, and password.',
+          'IMAP credentials are required: host, username, and password.',
           400
         );
+      }
+      
+      // Ensure secure field has a default value
+      if (imap.secure === undefined) {
+        imap.secure = true; // Default to secure for most email providers
+      }
+      
+      // Ensure port has a default value
+      if (!imap.port) {
+        imap.port = imap.secure ? 993 : 143; // 993 for SSL, 143 for non-SSL
       }
     }
 
@@ -159,7 +169,8 @@ class EmailConnectionController {
   });
 
   /**
-   * Delete an email connection
+   * Delete an email connection and all associated email transactions
+   * This ensures data consistency by removing all related data when a connection is deleted
    */
   deleteConnection = catchAsync(async (req, res) => {
     const connection = await EmailConnection.findOne({
@@ -172,13 +183,48 @@ class EmailConnectionController {
       throw new AppError('Email connection not found', 404);
     }
 
-    // Soft delete
-    connection.isActive = false;
-    await connection.save();
+    // Delete all associated email transactions first (cascade delete)
+    const EmailTransaction = require('../models/EmailTransaction');
+    
+    // Find transactions that might have created actual transactions
+    const emailTransactions = await EmailTransaction.find({
+      emailConnectionId: connection._id,
+      userId: req.params.userId
+    });
+    
+    // Delete any created transactions from email transactions
+    const Transaction = require('../models/Transaction');
+    let deletedActualTransactions = 0;
+    
+    for (const emailTx of emailTransactions) {
+      if (emailTx.createdTransactionId) {
+        try {
+          await Transaction.findByIdAndDelete(emailTx.createdTransactionId);
+          deletedActualTransactions++;
+        } catch (error) {
+          console.log(`⚠️  Could not delete created transaction ${emailTx.createdTransactionId}: ${error.message}`);
+        }
+      }
+    }
+    
+    // Now delete all email transactions
+    const deletedTransactions = await EmailTransaction.deleteMany({
+      emailConnectionId: connection._id,
+      userId: req.params.userId
+    });
+
+    console.log(`🗑️  Deleted ${deletedTransactions.deletedCount} email transactions and ${deletedActualTransactions} created transactions for connection ${connection._id}`);
+
+    // Now delete the connection itself
+    await EmailConnection.findByIdAndDelete(connection._id);
 
     res.json({
       status: 'success',
-      message: 'Email connection deleted successfully'
+      message: `Email connection and ${deletedTransactions.deletedCount} associated email transactions deleted successfully${deletedActualTransactions > 0 ? ` (including ${deletedActualTransactions} created transactions)` : ''}`,
+      data: {
+        deletedEmailTransactions: deletedTransactions.deletedCount,
+        deletedCreatedTransactions: deletedActualTransactions
+      }
     });
   });
 
@@ -222,8 +268,28 @@ class EmailConnectionController {
       throw new AppError('Email scanning is disabled for this connection', 400);
     }
 
-    // Start scanning in background
-    const scanResult = await this.scanner.scanEmails(connection);
+    // Get scan options from request body
+    const scanOptions = req.body.scanOptions || {};
+    const maxEmails = scanOptions.maxEmails || connection.syncSettings.maxEmailsPerScan || 50;
+    const scanDays = scanOptions.scanDays || connection.syncSettings.scanDays || 7;
+    const customKeywords = scanOptions.customKeywords || connection.syncSettings.scanKeywords;
+
+    // Ensure IMAP settings have proper default values for existing connections
+    if (connection.provider === 'custom' && connection.imap) {
+      if (connection.imap.secure === undefined) {
+        connection.imap.secure = true; // Default to secure for most email providers
+      }
+      if (!connection.imap.port) {
+        connection.imap.port = connection.imap.secure ? 993 : 143;
+      }
+    }
+
+    // Start scanning in background with custom options
+    const scanResult = await this.scanner.scanEmails(connection, {
+      maxEmails,
+      scanDays,
+      customKeywords
+    });
 
     res.json({
       status: 'success',
@@ -314,12 +380,16 @@ class EmailConnectionController {
 
     const emailTransaction = await EmailTransaction.findOne({
       _id: req.params.transactionId,
-      userId: req.params.userId,
-      status: 'pending'
+      userId: req.params.userId
     });
 
     if (!emailTransaction) {
-      throw new AppError('Email transaction not found or already processed', 404);
+      throw new AppError('Email transaction not found', 404);
+    }
+
+    // Check if transaction is already processed
+    if (emailTransaction.isProcessed) {
+      throw new AppError('This transaction has already been processed and cannot be approved', 400);
     }
 
     try {
@@ -358,12 +428,16 @@ class EmailConnectionController {
   rejectTransaction = catchAsync(async (req, res) => {
     const emailTransaction = await EmailTransaction.findOne({
       _id: req.params.transactionId,
-      userId: req.params.userId,
-      status: 'pending'
+      userId: req.params.userId
     });
 
     if (!emailTransaction) {
-      throw new AppError('Email transaction not found or already processed', 404);
+      throw new AppError('Email transaction not found', 404);
+    }
+
+    // Check if transaction is already processed
+    if (emailTransaction.isProcessed) {
+      throw new AppError('This transaction has already been processed and cannot be rejected', 400);
     }
 
     await emailTransaction.reject();
@@ -378,6 +452,13 @@ class EmailConnectionController {
    * Modify an email transaction
    */
   modifyTransaction = catchAsync(async (req, res) => {
+    console.log('🔧 Modify transaction endpoint called');
+    console.log('   Transaction ID:', req.params.transactionId);
+    console.log('   User ID:', req.params.userId);
+    console.log('   Request body:', req.body);
+    console.log('   Request method:', req.method);
+    console.log('   Request URL:', req.originalUrl);
+    
     const {
       amount,
       type,
@@ -389,12 +470,16 @@ class EmailConnectionController {
 
     const emailTransaction = await EmailTransaction.findOne({
       _id: req.params.transactionId,
-      userId: req.params.userId,
-      status: 'pending'
+      userId: req.params.userId
     });
 
     if (!emailTransaction) {
-      throw new AppError('Email transaction not found or already processed', 404);
+      throw new AppError('Email transaction not found', 404);
+    }
+
+    // Check if transaction is already processed
+    if (emailTransaction.isProcessed) {
+      throw new AppError('This transaction has already been processed and cannot be modified', 400);
     }
 
     const modifiedData = {};

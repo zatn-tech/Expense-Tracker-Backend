@@ -11,22 +11,29 @@ class EmailScanner {
   /**
    * Scan emails for a specific email connection
    */
-  async scanEmails(emailConnection) {
+  async scanEmails(emailConnection, scanOptions = {}) {
     try {
       let emails = [];
       
+      // Apply scan options
+      const maxEmails = scanOptions.maxEmails || emailConnection.syncSettings?.maxEmailsPerScan || 50;
+      const scanDays = scanOptions.scanDays || emailConnection.syncSettings?.scanDays || 7;
+      const customKeywords = scanOptions.customKeywords || emailConnection.syncSettings?.scanKeywords;
+      
+      console.log(`🔍 Scanning with options: maxEmails=${maxEmails}, scanDays=${scanDays}`);
+      
       switch (emailConnection.provider) {
         case 'gmail':
-          emails = await this.scanGmail(emailConnection);
+          emails = await this.scanGmail(emailConnection, { maxEmails, scanDays });
           break;
         case 'outlook':
-          emails = await this.scanOutlook(emailConnection);
+          emails = await this.scanOutlook(emailConnection, { maxEmails, scanDays });
           break;
         case 'yahoo':
-          emails = await this.scanYahoo(emailConnection);
+          emails = await this.scanYahoo(emailConnection, { maxEmails, scanDays });
           break;
         case 'custom':
-          emails = await this.scanCustom(emailConnection);
+          emails = await this.scanCustom(emailConnection, { maxEmails, scanDays });
           break;
         default:
           throw new Error(`Unsupported email provider: ${emailConnection.provider}`);
@@ -47,10 +54,6 @@ class EmailScanner {
         }
         processedEmailIds.add(email.id);
         
-        console.log(`\n📧 Processing email ${i + 1}/${emails.length}:`);
-        console.log(`   Subject: ${email.subject}`);
-        console.log(`   From: ${email.from}`);
-        console.log(`   Content length: ${email.content ? email.content.length : 0} characters`);
         
         try {
           const transactions = await this.detector.detectTransactions(
@@ -284,14 +287,14 @@ class EmailScanner {
   /**
    * Scan custom email provider using IMAP
    */
-  async scanCustom(emailConnection) {
+  async scanCustom(emailConnection, scanOptions = {}) {
     try {
       // Validate IMAP credentials
       if (!emailConnection.imap || !emailConnection.imap.host || !emailConnection.imap.username || !emailConnection.imap.password) {
         throw new Error('IMAP credentials are required: host, username, and password');
       }
       
-      return await this.scanIMAP(emailConnection);
+      return await this.scanIMAP(emailConnection, scanOptions);
     } catch (error) {
       console.error('Error scanning custom email:', error);
       
@@ -300,6 +303,8 @@ class EmailScanner {
         throw new Error(`Gmail IMAP Authentication Failed: ${error.message}\n\nTo fix this:\n1. Enable 2-Factor Authentication in your Google Account\n2. Generate an App Password (not your regular password)\n3. Use the App Password in the connection settings`);
       } else if (error.message.includes('Invalid credentials')) {
         throw new Error(`Invalid IMAP Credentials: ${error.message}\n\nFor Gmail, you need an App Password, not your regular password.\n\nSteps:\n1. Go to Google Account Security\n2. Enable 2-Step Verification\n3. Generate App Password for Mail\n4. Use the 16-character app password`);
+      } else if (error.message.includes('timeout') || error.message.includes('Timed out')) {
+        throw new Error(`Email server connection timeout. This usually means:\n\n1. Email server is slow or overloaded\n2. Network connection issues\n3. Firewall blocking the connection\n4. Incorrect server settings\n\nSolutions:\n- Wait a few minutes and try again\n- Check your internet connection\n- Verify server host and port settings\n- Contact your email provider if the issue persists\n\nOriginal error: ${error.message}`);
       }
       
       throw error;
@@ -307,20 +312,78 @@ class EmailScanner {
   }
 
   /**
-   * Scan email using IMAP
+   * Get TLS configuration for IMAP connection
    */
-  async scanIMAP(emailConnection) {
+  getTLSConfig(emailConnection, attempt = 0) {
+    const isSecure = emailConnection.imap.secure === true || emailConnection.imap.secure === 'true';
+    
+    // Different TLS configurations to try
+    const tlsConfigs = [
+      // Production-optimized configuration (first attempt)
+      {
+        rejectUnauthorized: false,
+        secureProtocol: 'TLSv1_2_method',
+        ciphers: 'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384',
+        honorCipherOrder: true,
+        checkServerIdentity: () => false, // Must be a function, not boolean
+        servername: emailConnection.imap.host
+      },
+      // Fallback configuration for older servers
+      {
+        rejectUnauthorized: false,
+        secureProtocol: 'TLSv1_method',
+        ciphers: 'HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA',
+        honorCipherOrder: true,
+        checkServerIdentity: () => false // Must be a function, not boolean
+      },
+      // Most permissive configuration (last resort)
+      {
+        rejectUnauthorized: false,
+        checkServerIdentity: () => false // Must be a function, not boolean
+      }
+    ];
+    
+    return {
+      tls: isSecure,
+      tlsOptions: tlsConfigs[attempt] || tlsConfigs[tlsConfigs.length - 1]
+    };
+  }
+
+  /**
+   * Scan email using IMAP with retry logic
+   */
+  async scanIMAP(emailConnection, retryCount = 0) {
+    const maxRetries = 3;
+    const retryDelay = 5000; // 5 seconds between retries
+    const operationTimeout = 60000; // 60 second timeout for entire operation
+
     return new Promise((resolve, reject) => {
+      // Set operation timeout
+      const timeoutId = setTimeout(() => {
+        console.log('⏱️ IMAP operation timed out, ending connection...');
+        imap.end();
+        reject(new Error('IMAP operation timed out after 60 seconds'));
+      }, operationTimeout);
+      
+      let imap; // Declare imap variable for timeout handler
       try {
-        const imap = new Imap({
+        // Decrypt password for IMAP connection
+        const decryptedPassword = emailConnection.decrypt(emailConnection.imap.password);
+        
+        // Get TLS configuration based on retry attempt
+        const tlsConfig = this.getTLSConfig(emailConnection, retryCount);
+        
+        imap = new Imap({
           user: emailConnection.imap.username,
-          password: emailConnection.decrypt(emailConnection.imap.password),
+          password: decryptedPassword,
           host: emailConnection.imap.host,
           port: emailConnection.imap.port,
-          tls: emailConnection.imap.secure,
-          tlsOptions: { rejectUnauthorized: false },
-          connTimeout: 60000,
-          authTimeout: 3000
+          tls: tlsConfig.tls,
+          tlsOptions: tlsConfig.tlsOptions,
+          connTimeout: 30000, // Reduced from 60s to 30s
+          authTimeout: 15000,  // Reduced from 30s to 15s
+          keepalive: true,     // Keep connection alive
+          debug: false         // Disable debug logging for cleaner output
         });
 
         const emails = [];
@@ -330,34 +393,38 @@ class EmailScanner {
         startDate.setDate(startDate.getDate() - scanDays);
 
         imap.once('ready', () => {
-          imap.openBox('INBOX', false, (err, box) => {
-            if (err) {
-              imap.end();
-              return reject(err);
-            }
+                      imap.openBox('INBOX', false, (err, box) => {
+              if (err) {
+                clearTimeout(timeoutId);
+                imap.end();
+                return reject(err);
+              }
 
-            // Search for emails in the date range
+            // Search for emails in the date range with optimization
             const searchCriteria = [
-              ['SINCE', startDate]
-              // Removed UNSEEN filter to get all emails in date range
+              ['SINCE', startDate],
+              ['SMALLER', 50000] // Only fetch emails smaller than 50KB for faster processing
             ];
 
             imap.search(searchCriteria, (err, results) => {
               if (err) {
+                clearTimeout(timeoutId);
                 imap.end();
                 return reject(err);
               }
 
               if (results.length === 0) {
+                clearTimeout(timeoutId);
                 imap.end();
                 return resolve([]);
               }
 
-              // Limit to last 100 emails to prevent overwhelming
-              const emailsToFetch = results.slice(-100);
+              // Limit to last 50 emails for faster processing (reduced from 100)
+              const emailsToFetch = results.slice(-50);
               emailCount = emailsToFetch.length;
 
               if (emailCount === 0) {
+                clearTimeout(timeoutId);
                 imap.end();
                 return resolve([]);
               }
@@ -374,8 +441,6 @@ class EmailScanner {
                   let headers = '';
 
                   msg.on('body', (stream, info) => {
-                    console.log(`   📨 Fetching ${info.which} for email ${uid}, encoding: ${info.encoding}, size: ${info.size}`);
-                    
                     if (info.which === 'HEADER.FIELDS (FROM TO SUBJECT DATE)') {
                       // Fetch headers
                       stream.on('data', (chunk) => {
@@ -391,13 +456,9 @@ class EmailScanner {
 
                   msg.once('attributes', (attrs) => {
                     attributes = attrs;
-                    console.log(`   📋 Email attributes: flags=${attrs.flags}, uid=${attrs.uid}`);
                   });
 
                   msg.once('end', () => {
-                    console.log(`   📝 Headers length: ${headers.length}`);
-                    console.log(`   📝 Body buffer length: ${buffer.length}`);
-                    
                     try {
                       // Parse email content with headers
                       const email = this.parseIMAPEmailWithHeaders(buffer, headers, attributes, uid);
@@ -405,28 +466,26 @@ class EmailScanner {
                         emails.push(email);
                       } else {
                         // Fallback to original parsing method
-                        console.log(`   ⚠️  Header parsing failed, trying fallback method...`);
                         const fallbackEmail = this.parseIMAPEmail(buffer, attributes, uid);
                         if (fallbackEmail) {
                           emails.push(fallbackEmail);
                         }
                       }
                     } catch (error) {
-                      console.error('Error parsing IMAP email:', error);
                       // Try fallback method
                       try {
-                        console.log(`   ⚠️  Trying fallback parsing method...`);
                         const fallbackEmail = this.parseIMAPEmail(buffer, attributes, uid);
                         if (fallbackEmail) {
                           emails.push(fallbackEmail);
                         }
                       } catch (fallbackError) {
-                        console.error('Fallback parsing also failed:', fallbackError);
+                        // Silently continue with next email
                       }
                     }
 
                     emailCount--;
                     if (emailCount === 0) {
+                      clearTimeout(timeoutId); // Clear timeout on success
                       imap.end();
                       resolve(emails);
                     }
@@ -446,8 +505,58 @@ class EmailScanner {
           });
         });
 
-        imap.once('error', (err) => {
-          reject(err);
+        imap.once('error', async (err) => {
+          clearTimeout(timeoutId);
+          console.error(`❌ IMAP error on attempt ${retryCount + 1}:`, err.message);
+          
+          // Check if this is a timeout, TLS, or network error that we should retry
+          const shouldRetry = (
+            err.source === 'timeout-auth' || 
+            err.message.includes('timeout') || 
+            err.message.includes('ECONNRESET') ||
+            err.message.includes('ENOTFOUND') ||
+            err.message.includes('ECONNREFUSED') ||
+            err.message.includes('TLS') ||
+            err.message.includes('SSL') ||
+            err.message.includes('certificate') ||
+            err.message.includes('handshake')
+          ) && retryCount < maxRetries;
+          
+          if (shouldRetry) {
+            console.log(`⏳ Retrying IMAP connection in ${retryDelay/1000} seconds... (attempt ${retryCount + 2}/${maxRetries + 1})`);
+            setTimeout(async () => {
+              try {
+                const result = await this.scanIMAP(emailConnection, retryCount + 1);
+                resolve(result);
+              } catch (retryError) {
+                reject(retryError);
+              }
+            }, retryDelay);
+          } else {
+            // Provide better error messages for common issues
+            let errorMessage = err.message;
+            if (err.source === 'timeout-auth' || err.message.includes('timeout')) {
+              errorMessage = `Email server authentication timeout. This can happen when:\n` +
+                           `1. Email server is slow to respond\n` +
+                           `2. Network connection is unstable\n` +
+                           `3. Server is temporarily overloaded\n\n` +
+                           `Please try again in a few minutes. If this persists, check your email provider's server status.`;
+            } else if (err.message.includes('TLS') || err.message.includes('SSL') || err.message.includes('certificate')) {
+              errorMessage = `TLS/SSL connection error. This is common in production environments:\n` +
+                           `1. Server certificate validation issues\n` +
+                           `2. TLS version incompatibility\n` +
+                           `3. Cipher suite mismatch\n\n` +
+                           `The system will automatically retry with different TLS settings.\n` +
+                           `If this persists, contact your email provider for server configuration details.`;
+            } else if (err.message.includes('handshake')) {
+              errorMessage = `TLS handshake failed. This usually indicates:\n` +
+                           `1. Server doesn't support the requested TLS version\n` +
+                           `2. Cipher suite incompatibility\n` +
+                           `3. Certificate chain issues\n\n` +
+                           `The system will retry with compatible settings.`;
+            }
+            reject(new Error(errorMessage));
+          }
         });
 
         imap.once('end', () => {
@@ -457,6 +566,7 @@ class EmailScanner {
         imap.connect();
 
       } catch (error) {
+        clearTimeout(timeoutId);
         reject(error);
       }
     });
@@ -467,45 +577,32 @@ class EmailScanner {
    */
   parseIMAPEmail(buffer, attributes, uid) {
     try {
-      console.log(`   🔍 Parsing IMAP email with buffer length: ${buffer.length}`);
-      console.log(`   📧 Raw buffer preview: ${buffer.substring(0, 200)}...`);
-      
       // Extract email headers with better parsing
       const lines = buffer.split('\n');
       let subject = '';
       let from = '';
       let date = new Date();
-
-      console.log(`   📋 Parsing ${lines.length} lines for headers...`);
       
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         const trimmedLine = line.trim();
         
-        // Debug: show first few lines
-        if (i < 10) {
-          console.log(`   📝 Line ${i}: "${trimmedLine}"`);
-        }
-        
         // Look for Subject header (case-insensitive, handle various formats)
         if (trimmedLine.toLowerCase().startsWith('subject:')) {
           subject = trimmedLine.substring(8).trim();
-          console.log(`   🎯 Found Subject: "${subject}"`);
           
           // Handle encoded subjects (like =?utf-8?B?...)
           if (subject.startsWith('=?') && subject.includes('?=')) {
             try {
               subject = this.decodeSubject(subject);
-              console.log(`   🔓 Decoded Subject: "${subject}"`);
             } catch (e) {
-              console.log(`   ⚠️  Could not decode subject: ${subject}`);
+              // Continue with original subject
             }
           }
         } 
         // Look for From header (case-insensitive, handle various formats)
         else if (trimmedLine.toLowerCase().startsWith('from:')) {
           from = trimmedLine.substring(5).trim();
-          console.log(`   👤 Found From: "${from}"`);
           
           // Clean up email addresses
           if (from.includes('<') && from.includes('>')) {
@@ -534,7 +631,6 @@ class EmailScanner {
         
         // Stop parsing headers after we find a blank line or after reasonable number of lines
         if (trimmedLine === '' || i > 50) {
-          console.log(`   🛑 Stopping header parsing at line ${i}`);
           break;
         }
       }
@@ -546,7 +642,6 @@ class EmailScanner {
       const bodyStart = buffer.indexOf('\n\n');
       if (bodyStart !== -1) {
         content = buffer.substring(bodyStart + 2);
-        console.log(`   📄 Found body using \\n\\n separator at position ${bodyStart}`);
       }
       
       // If still no content, try different separators
@@ -556,7 +651,6 @@ class EmailScanner {
           const sepIndex = buffer.indexOf(sep);
           if (sepIndex !== -1) {
             content = buffer.substring(sepIndex + sep.length);
-            console.log(`   📄 Found body using separator "${sep.replace(/\n/g, '\\n').replace(/\r/g, '\\r')}" at position ${sepIndex}`);
             if (content.length > 20) break;
           }
         }
@@ -570,7 +664,6 @@ class EmailScanner {
           const firstLine = afterHeaders.split('\n')[0];
           if (firstLine && firstLine.trim().length > 10) {
             content = afterHeaders;
-            console.log(`   📄 Using content after headers`);
           }
         }
       }
@@ -578,24 +671,15 @@ class EmailScanner {
       // Fallback: use the entire buffer if no body found
       if (!content || content.length < 20) {
         content = buffer;
-        console.log(`   ⚠️  Using fallback: entire buffer as content`);
       }
       
       // Clean HTML content and decode quoted-printable
       if (content.includes('<!DOCTYPE html>') || content.includes('<html')) {
         content = this.extractTextFromHTML(content);
-        console.log(`   🧹 Cleaned HTML content, new length: ${content.length}`);
       }
       
       // Decode quoted-printable encoding
       content = this.decodeQuotedPrintable(content);
-      
-      console.log(`   📝 Final content length: ${content.length} characters`);
-      console.log(`   📝 Content preview: ${content.substring(0, 100)}...`);
-      console.log(`   📧 Final parsed email:`);
-      console.log(`      Subject: "${subject}"`);
-      console.log(`      From: "${from}"`);
-      console.log(`      Date: ${date.toISOString()}`);
 
       return {
         id: uid.toString(),
@@ -605,7 +689,6 @@ class EmailScanner {
         content: content || 'No Content'
       };
     } catch (error) {
-      console.error('Error parsing IMAP email:', error);
       return null;
     }
   }
@@ -615,11 +698,8 @@ class EmailScanner {
    */
   parseIMAPEmailWithHeaders(bodyBuffer, headersBuffer, attributes, uid) {
     try {
-      console.log(`   🔍 Parsing IMAP email with headers length: ${headersBuffer.length}, body length: ${bodyBuffer.length}`);
-      
       // Parse headers first
       const headers = this.parseHeaders(headersBuffer);
-      console.log(`   📋 Parsed headers:`, headers);
       
       // Extract email body content
       let content = bodyBuffer;
@@ -627,7 +707,6 @@ class EmailScanner {
       // Clean HTML content and decode quoted-printable
       if (content.includes('<!DOCTYPE html>') || content.includes('<html')) {
         content = this.extractTextFromHTML(content);
-        console.log(`   🧹 Cleaned HTML content, new length: ${content.length}`);
       }
       
       // Decode quoted-printable encoding
@@ -1041,20 +1120,26 @@ class EmailScanner {
   }
 
   /**
-   * Test IMAP connection
+   * Test IMAP connection with improved timeout handling
    */
   async testIMAPConnection(emailConnection) {
     return new Promise((resolve) => {
       try {
+        console.log(`🔍 Testing IMAP connection for ${emailConnection.email}...`);
+        
+        // Get TLS configuration for test connection
+        const tlsConfig = this.getTLSConfig(emailConnection, 0);
+        
         const imap = new Imap({
           user: emailConnection.imap.username,
           password: emailConnection.decrypt(emailConnection.imap.password),
           host: emailConnection.imap.host,
           port: emailConnection.imap.port,
-          tls: emailConnection.imap.secure,
-          tlsOptions: { rejectUnauthorized: false },
-          connTimeout: 30000,
-          authTimeout: 3000
+          tls: tlsConfig.tls,
+          tlsOptions: tlsConfig.tlsOptions,
+          connTimeout: 60000,
+          authTimeout: 30000,
+          keepalive: false
         });
 
         imap.once('ready', () => {
@@ -1085,8 +1170,38 @@ class EmailScanner {
         imap.once('error', (err) => {
           let errorMessage = `IMAP connection error: ${err.message}`;
           
+          // Handle timeout errors specifically
+          if (err.source === 'timeout-auth' || err.message.includes('timeout')) {
+            errorMessage = `Connection timeout while authenticating with email server.\n\n`;
+            errorMessage += `This commonly happens when:\n`;
+            errorMessage += `• Email server is slow or overloaded\n`;
+            errorMessage += `• Network connection is unstable\n`;
+            errorMessage += `• Firewall is blocking the connection\n`;
+            errorMessage += `• Server settings are incorrect\n\n`;
+            errorMessage += `Solutions:\n`;
+            errorMessage += `• Wait a few minutes and try again\n`;
+            errorMessage += `• Check your internet connection\n`;
+            errorMessage += `• Verify server host and port settings\n`;
+            errorMessage += `• For Gmail: Use imap.gmail.com:993 with SSL enabled\n`;
+            errorMessage += `• Contact your email provider if this persists`;
+          }
+          // Handle TLS/SSL errors in production
+          else if (err.message.includes('TLS') || err.message.includes('SSL') || err.message.includes('certificate') || err.message.includes('handshake')) {
+            errorMessage = `TLS/SSL connection error in production environment:\n\n`;
+            errorMessage += `This is common when:\n`;
+            errorMessage += `• Server certificate validation fails\n`;
+            errorMessage += `• TLS version incompatibility\n`;
+            errorMessage += `• Cipher suite mismatch\n`;
+            errorMessage += `• Production security policies are stricter\n\n`;
+            errorMessage += `Solutions:\n`;
+            errorMessage += `• The system will retry with compatible TLS settings\n`;
+            errorMessage += `• Check if your email provider supports TLS 1.2+\n`;
+            errorMessage += `• Verify server hostname matches certificate\n`;
+            errorMessage += `• Contact your email provider for server configuration\n\n`;
+            errorMessage += `Original error: ${err.message}`;
+          }
           // Provide specific guidance for common Gmail issues
-          if (err.textCode === 'AUTHENTICATIONFAILED') {
+          else if (err.textCode === 'AUTHENTICATIONFAILED') {
             errorMessage += '\n\n🔑 Authentication failed. For Gmail, you need:';
             errorMessage += '\n1. 2-Factor Authentication enabled';
             errorMessage += '\n2. App Password (not regular password)';
@@ -1104,7 +1219,8 @@ class EmailScanner {
           resolve({
             success: false,
             error: errorMessage,
-            textCode: err.textCode
+            textCode: err.textCode,
+            source: err.source
           });
         });
 
@@ -1112,14 +1228,14 @@ class EmailScanner {
           // Connection ended
         });
 
-        // Set connection timeout
+        // Set connection timeout with better error message
         setTimeout(() => {
           imap.end();
           resolve({
             success: false,
-            error: 'IMAP connection timeout'
+            error: 'IMAP connection timeout after 60 seconds. The email server is not responding. Please check your server settings and try again.'
           });
-        }, 30000);
+        }, 60000);
 
         imap.connect();
 
