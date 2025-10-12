@@ -6,6 +6,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
 const session = require('express-session');
+const MongoStore = require('connect-mongo');
 
 const globalErrorHandler = require('./middleware/globalErrorHandler');
 const AppError = require('./utils/appError');
@@ -28,6 +29,9 @@ const notificationRoutes = require('./routes/notifications');
 const transferRoutes = require('./routes/transfers');
 const emailConnectionRoutes = require('./routes/emailConnections');
 const setupRoutes = require('./routes/setup');
+const updateRoutes = require('./routes/updates');
+const userPreferencesRoutes = require('./routes/userPreferences');
+const adminUpdatesRoutes = require('./routes/adminUpdates');
 
 const app = express();
 
@@ -44,6 +48,8 @@ const corsOptions = {
       'http://localhost:3000',
       'http://127.0.0.1:3000',
       'http://192.168.0.105:3000', // Your computer's IP for mobile access
+      'https://expensetracker.zatn.in', // Production domain
+      'https://www.expensetracker.zatn.in', // Production domain with www
       process.env.CLIENT_URL
     ].filter(Boolean); // Remove undefined values
     
@@ -80,6 +86,10 @@ app.use(session({
   secret: process.env.SESSION_SECRET || 'your-secret-key',
   resave: false,
   saveUninitialized: false,
+  store: MongoStore.create({
+    mongoUrl: process.env.MONGODB_URI || 'mongodb://localhost:27017/expensetracker',
+    touchAfter: 24 * 3600 // lazy session update
+  }),
   cookie: {
     secure: process.env.NODE_ENV === 'production',
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
@@ -117,6 +127,12 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', socialAuthRoutes);
+
+// Specific user routes with userId parameter - MUST come before general /api/user routes
+app.use('/api/user/:userId/updates', updateRoutes);
+app.use('/api/user/:userId/preferences', userPreferencesRoutes);
+
+// General user routes
 app.use('/api/user', require('./routes/accounts'));
 app.use('/api/user', transactionRoutes);
 app.use('/api/user', budgetRoutes);
@@ -126,11 +142,12 @@ app.use('/api/user', recurringTransactionRoutes);
 app.use('/api/user', goalRoutes);
 app.use('/api/user', categoryRoutes);
 app.use('/api/user', userRoutes);
-app.use('/api/transfers', transferRoutes);
 app.use('/api/user', emailConnectionRoutes);
-app.use('/api/setup', setupRoutes);
 
+app.use('/api/transfers', transferRoutes);
+app.use('/api/setup', setupRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/admin/updates', adminUpdatesRoutes);
 
 // Fixed version - wildcard with parameter name
 app.all('*path', (req, res, next) => {

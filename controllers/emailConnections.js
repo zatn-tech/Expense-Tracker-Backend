@@ -169,10 +169,12 @@ class EmailConnectionController {
   });
 
   /**
-   * Delete an email connection and all associated email transactions
+   * Delete an email connection and optionally all associated email transactions
    * This ensures data consistency by removing all related data when a connection is deleted
    */
   deleteConnection = catchAsync(async (req, res) => {
+    const { deleteTransactions = true } = req.body; // Default to true for backward compatibility
+    
     const connection = await EmailConnection.findOne({
       _id: req.params.connectionId,
       userId: req.params.userId,
@@ -183,47 +185,57 @@ class EmailConnectionController {
       throw new AppError('Email connection not found', 404);
     }
 
-    // Delete all associated email transactions first (cascade delete)
-    const EmailTransaction = require('../models/EmailTransaction');
-    
-    // Find transactions that might have created actual transactions
-    const emailTransactions = await EmailTransaction.find({
-      emailConnectionId: connection._id,
-      userId: req.params.userId
-    });
-    
-    // Delete any created transactions from email transactions
-    const Transaction = require('../models/Transaction');
+    let deletedEmailTransactions = 0;
     let deletedActualTransactions = 0;
     
-    for (const emailTx of emailTransactions) {
-      if (emailTx.createdTransactionId) {
-        try {
-          await Transaction.findByIdAndDelete(emailTx.createdTransactionId);
-          deletedActualTransactions++;
-        } catch (error) {
-          console.log(`⚠️  Could not delete created transaction ${emailTx.createdTransactionId}: ${error.message}`);
+    if (deleteTransactions) {
+      // Delete all associated email transactions first (cascade delete)
+      const EmailTransaction = require('../models/EmailTransaction');
+      
+      // Find transactions that might have created actual transactions
+      const emailTransactions = await EmailTransaction.find({
+        emailConnectionId: connection._id,
+        userId: req.params.userId
+      });
+      
+      // Delete any created transactions from email transactions
+      const Transaction = require('../models/Transaction');
+      
+      for (const emailTx of emailTransactions) {
+        if (emailTx.createdTransactionId) {
+          try {
+            await Transaction.findByIdAndDelete(emailTx.createdTransactionId);
+            deletedActualTransactions++;
+          } catch (error) {
+            console.log(`⚠️  Could not delete created transaction ${emailTx.createdTransactionId}: ${error.message}`);
+          }
         }
       }
+      
+      // Now delete all email transactions
+      const deletedTransactions = await EmailTransaction.deleteMany({
+        emailConnectionId: connection._id,
+        userId: req.params.userId
+      });
+      
+      deletedEmailTransactions = deletedTransactions.deletedCount;
+      console.log(`🗑️  Deleted ${deletedEmailTransactions} email transactions and ${deletedActualTransactions} created transactions for connection ${connection._id}`);
+    } else {
+      console.log(`📧 Keeping email transactions for connection ${connection._id} as requested`);
     }
-    
-    // Now delete all email transactions
-    const deletedTransactions = await EmailTransaction.deleteMany({
-      emailConnectionId: connection._id,
-      userId: req.params.userId
-    });
-
-    console.log(`🗑️  Deleted ${deletedTransactions.deletedCount} email transactions and ${deletedActualTransactions} created transactions for connection ${connection._id}`);
 
     // Now delete the connection itself
     await EmailConnection.findByIdAndDelete(connection._id);
 
     res.json({
       status: 'success',
-      message: `Email connection and ${deletedTransactions.deletedCount} associated email transactions deleted successfully${deletedActualTransactions > 0 ? ` (including ${deletedActualTransactions} created transactions)` : ''}`,
+      message: deleteTransactions 
+        ? `Email connection and ${deletedEmailTransactions} associated email transactions deleted successfully${deletedActualTransactions > 0 ? ` (including ${deletedActualTransactions} created transactions)` : ''}`
+        : 'Email connection deleted successfully. Associated transactions have been preserved.',
       data: {
-        deletedEmailTransactions: deletedTransactions.deletedCount,
-        deletedCreatedTransactions: deletedActualTransactions
+        deletedEmailTransactions: deletedEmailTransactions,
+        deletedCreatedTransactions: deletedActualTransactions,
+        deleteTransactions: deleteTransactions
       }
     });
   });
@@ -635,6 +647,95 @@ class EmailConnectionController {
     res.json({
       status: 'success',
       data: result
+    });
+  });
+
+  /**
+   * Bulk delete email transactions
+   * Supports filtering by connection, status, date range, etc.
+   */
+  bulkDeleteEmailTransactions = catchAsync(async (req, res) => {
+    const { transactionIds, connectionId, status, dateFrom, dateTo, deleteCreatedTransactions = false } = req.body;
+    
+    // Build query based on provided filters
+    const query = {
+      userId: req.params.userId
+    };
+
+    // Filter by specific transaction IDs if provided
+    if (transactionIds && transactionIds.length > 0) {
+      query._id = { $in: transactionIds };
+    }
+
+    // Filter by email connection if provided
+    if (connectionId) {
+      query.emailConnectionId = connectionId;
+    }
+
+    // Filter by status if provided
+    if (status) {
+      query.status = status;
+    }
+
+    // Filter by date range if provided
+    if (dateFrom || dateTo) {
+      query.detectedDate = {};
+      if (dateFrom) query.detectedDate.$gte = new Date(dateFrom);
+      if (dateTo) query.detectedDate.$lte = new Date(dateTo);
+    }
+
+    const EmailTransaction = require('../models/EmailTransaction');
+    const Transaction = require('../models/Transaction');
+
+    // Find transactions that will be deleted
+    const emailTransactions = await EmailTransaction.find(query);
+    
+    if (emailTransactions.length === 0) {
+      return res.json({
+        status: 'success',
+        message: 'No email transactions found matching the criteria',
+        data: {
+          deletedEmailTransactions: 0,
+          deletedCreatedTransactions: 0
+        }
+      });
+    }
+
+    let deletedCreatedTransactions = 0;
+    
+    // Delete created transactions if requested
+    if (deleteCreatedTransactions) {
+      for (const emailTx of emailTransactions) {
+        if (emailTx.createdTransactionId) {
+          try {
+            await Transaction.findByIdAndDelete(emailTx.createdTransactionId);
+            deletedCreatedTransactions++;
+          } catch (error) {
+            console.log(`⚠️  Could not delete created transaction ${emailTx.createdTransactionId}: ${error.message}`);
+          }
+        }
+      }
+    }
+    
+    // Delete email transactions
+    const deleteResult = await EmailTransaction.deleteMany(query);
+    
+    console.log(`🗑️  Bulk deleted ${deleteResult.deletedCount} email transactions${deletedCreatedTransactions > 0 ? ` and ${deletedCreatedTransactions} created transactions` : ''}`);
+
+    res.json({
+      status: 'success',
+      message: `Successfully deleted ${deleteResult.deletedCount} email transactions${deletedCreatedTransactions > 0 ? ` and ${deletedCreatedTransactions} created transactions` : ''}`,
+      data: {
+        deletedEmailTransactions: deleteResult.deletedCount,
+        deletedCreatedTransactions: deletedCreatedTransactions,
+        filters: {
+          transactionIds: transactionIds?.length || 0,
+          connectionId,
+          status,
+          dateFrom,
+          dateTo
+        }
+      }
     });
   });
 }

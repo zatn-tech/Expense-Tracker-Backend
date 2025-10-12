@@ -18,10 +18,7 @@ const app = require('./app');
 // Connect to MongoDB
 const DB = process.env.MONGODB_URI || 'mongodb://localhost:27017/expensetracker';
 
-mongoose.connect(DB, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => {
+mongoose.connect(DB).then(() => {
   console.log('✅ MongoDB connected successfully');
 }).catch((err) => {
   console.error('❌ MongoDB connection error:', err);

@@ -14,11 +14,9 @@ const userSchema = new mongoose.Schema({
   email: { 
     type: String, 
     required: [true, 'Email is required'], 
-    unique: true,  // ✅ Keep this
     lowercase: true,
     trim: true,
     match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Please enter a valid email']
-    // ❌ Remove: index: true (if you had this)
   },
   password: { 
     type: String, 
@@ -48,6 +46,17 @@ const userSchema = new mongoose.Schema({
   // Account Security
   loginAttempts: { type: Number, default: 0 },
   lockUntil: Date,
+  
+  // User Roles
+  role: {
+    type: String,
+    enum: ['user', 'admin', 'superadmin'],
+    default: 'user'
+  },
+  isAdmin: {
+    type: Boolean,
+    default: false
+  },
   
   // Two-Factor Authentication
   twoFactorEnabled: { type: Boolean, default: false },
